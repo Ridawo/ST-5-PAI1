@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS users(
     failed       INTEGER NOT NULL DEFAULT 0,
     locked_until REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS fallos_inexistentes(  -- bloqueo de nombres que no existen: igual que el de users
+    username     TEXT PRIMARY KEY,
+    failed       INTEGER NOT NULL,
+    locked_until REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS nonces(
     nonce   TEXT PRIMARY KEY,                -- la PK hace que un nonce repetido falle al insertar
     seen_at REAL NOT NULL
@@ -120,6 +125,14 @@ def leer_usuario(usuario):
     return salt, clave, bloqueado_hasta, fila_integra(row_mac, usuario, salt, clave, failed, bloqueado_hasta)
 
 
+def tras_fallo(failed, locked_until, max_fallos, bloqueo_seg):
+    """Regla del bloqueo: un fallo más; al llegar al tope se reinicia el contador y se bloquea."""
+    failed += 1
+    if failed >= max_fallos:
+        return 0, time.time() + bloqueo_seg
+    return failed, locked_until
+
+
 def apuntar_fallo(usuario, max_fallos, bloqueo_seg) -> None:
     """Suma un intento fallido. Al llegar a max_fallos, bloquea la cuenta bloqueo_seg segundos.
     Recalcula el row_mac para que el contador y el bloqueo queden protegidos por integridad."""
@@ -127,11 +140,25 @@ def apuntar_fallo(usuario, max_fallos, bloqueo_seg) -> None:
         fila = _db.execute("SELECT failed, locked_until FROM users WHERE username=?", (usuario,)).fetchone()
         if fila is None:
             return
-        failed, locked_until = fila[0] + 1, fila[1]
-        if failed >= max_fallos:  # al llegar al tope: se reinicia el contador y se bloquea
-            failed, locked_until = 0, time.time() + bloqueo_seg
+        failed, locked_until = tras_fallo(*fila, max_fallos, bloqueo_seg)
         _db.execute("UPDATE users SET failed=?, locked_until=? WHERE username=?", (failed, locked_until, usuario))
         _resellar_usuario(usuario)
+
+
+def bloqueo_inexistente(usuario) -> float:
+    """Hasta cuándo está 'bloqueado' un nombre que no existe (0 si no lo está)."""
+    fila = _uno("SELECT locked_until FROM fallos_inexistentes WHERE username=?", usuario)
+    return fila[0] if fila else 0.0
+
+
+def apuntar_fallo_inexistente(usuario, max_fallos, bloqueo_seg) -> None:
+    """apuntar_fallo para un nombre que no existe, con la misma regla y también en disco:
+    así ni el mensaje de bloqueo ni un reinicio del servidor delatan qué usuarios existen."""
+    with _lock, _db:
+        fila = _db.execute("SELECT failed, locked_until FROM fallos_inexistentes WHERE username=?",
+                           (usuario,)).fetchone() or (0, 0.0)
+        _db.execute("INSERT OR REPLACE INTO fallos_inexistentes VALUES (?,?,?)",
+                    (usuario, *tras_fallo(*fila, max_fallos, bloqueo_seg)))
 
 
 def limpiar_fallos(usuario) -> None:

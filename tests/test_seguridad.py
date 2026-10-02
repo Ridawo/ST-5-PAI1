@@ -41,7 +41,8 @@ class TestSeguridad(unittest.TestCase):
         # otro test ya había tocado la config del logging.
         logging.basicConfig(level=logging.INFO, format="    [srv] %(levelname)-7s %(message)s", force=True)
         cls.tmp = tempfile.mkdtemp()
-        datos.init(os.path.join(cls.tmp, "test.db"), os.path.join(cls.tmp, "test.key"))
+        cls.db = os.path.join(cls.tmp, "test.db")
+        datos.init(cls.db, os.path.join(cls.tmp, "test.key"))
         negocio.sembrar()
         cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Manejador)  # puerto 0 = uno libre
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
@@ -95,7 +96,7 @@ class TestSeguridad(unittest.TestCase):
     def test_password_guardada_con_salt_y_no_en_claro(self):
         """RS1a — Las contraseñas nunca se guardan en claro: se derivan con PBKDF2 y salt.
         Esperado: cada usuario con su propio salt y una clave de 32 bytes; la contraseña no aparece."""
-        filas = sqlite3.connect(os.path.join(self.tmp, "test.db")).execute("SELECT salt, key FROM users").fetchall()
+        filas = sqlite3.connect(self.db).execute("SELECT salt, key FROM users").fetchall()
         paso(f"leídas {len(filas)} filas de la tabla users directamente de SQLite")
         self.assertEqual(len({s for s, _ in filas}), len(filas))  # cada usuario con su propio salt
         ok(f"{len({s for s, _ in filas})} salts distintos para {len(filas)} usuarios (cada uno el suyo)")
@@ -140,12 +141,16 @@ class TestSeguridad(unittest.TestCase):
     def test_bloqueo_usuario_inexistente(self):
         """RS1b — Un usuario que no existe también se 'bloquea' tras 5 fallos, como uno real.
         Esperado: el mismo patrón de respuestas, así el bloqueo no delata qué usuarios existen."""
+        def intento():  # sin PBKDF2: con un usuario inexistente da igual la prueba que se mande
+            self.con.pedir(generador.login_init("fantasma"))
+            return self.con.pedir({"action": "LOGIN", "username": "fantasma",
+                                   "client_nonce": "00" * 16, "proof": "00" * 32})["reason"]
         paso(f"se falla el login {negocio.MAX_FALLOS} veces con 'fantasma', que no existe")
         for _ in range(negocio.MAX_FALLOS):
-            self.assertIn("incorrectas", self.login("fantasma", "mala12345")[0]["reason"])
-        resp, _ = self.login("fantasma", "mala12345")
-        self.assertIn("bloqueado", resp["reason"])
-        ok(f"al sexto intento: {resp['reason']} (igual que con una cuenta real)")
+            self.assertIn("incorrectas", intento())
+        motivo = intento()
+        self.assertIn("bloqueado", motivo)
+        ok(f"al sexto intento: {motivo} (igual que con una cuenta real)")
 
     def test_login_sin_reto(self):
         """RS3 — No se puede hacer LOGIN sin pedir antes LOGIN_INIT (el reto del servidor).
@@ -235,7 +240,7 @@ class TestSeguridad(unittest.TestCase):
         return msg
 
     def test_replay_timestamp_caducado(self):
-        """RS3 — Un mensaje fuera de la ventana de ±120 s se rechaza aunque esté bien firmado.
+        """RS3 — Un mensaje fuera de la ventana de TIME_WINDOW s se rechaza aunque esté bien firmado.
         Esperado: 'timestamp fuera de la ventana' si es de hace 5 min y también si viene 5 min del futuro."""
         sid, clave = self.sesion()
         for desfase in (-300, 300):
@@ -246,7 +251,7 @@ class TestSeguridad(unittest.TestCase):
 
     def test_timestamp_dentro_de_la_ventana_se_acepta(self):
         """RS3 — La ventana tolera relojes desfasados hasta TIME_WINDOW segundos.
-        Esperado: un mensaje 100 s atrasado o adelantado se acepta."""
+        Esperado: un mensaje 20 s dentro del límite, atrasado o adelantado, se acepta."""
         sid, clave = self.sesion()
         for desfase in (-(TIME_WINDOW - 20), TIME_WINDOW - 20):
             paso(f"TRANSFER con timestamp {desfase:+d} s (dentro de ±{TIME_WINDOW} s)")
@@ -256,31 +261,28 @@ class TestSeguridad(unittest.TestCase):
 
     def test_nonces_antiguos_se_borran(self):
         """RS3 — La tabla de nonces no crece sin fin: los de más de 2 ventanas se borran solos.
-        Esperado: al registrar un nonce nuevo desaparece uno de hace 245 s y se conserva uno de hace 200 s."""
-        ahora = time.time()
-        with sqlite3.connect(os.path.join(self.tmp, "test.db")) as bd:
-            bd.executemany("INSERT INTO nonces VALUES (?,?)", [("nonce-viejo", ahora - 2 * TIME_WINDOW - 5),
-                                                              ("nonce-reciente", ahora - 2 * TIME_WINDOW + 40)])
-        paso("se meten en la BD un nonce de hace 245 s y otro de hace 200 s; luego llega uno nuevo")
+        Esperado: al registrar un nonce nuevo desaparece uno de justo antes del límite y se conserva uno posterior."""
+        viejo, reciente = 2 * TIME_WINDOW + 5, 2 * TIME_WINDOW - 40
+        with sqlite3.connect(self.db) as bd:
+            bd.executemany("INSERT INTO nonces VALUES (?,?)", [("nonce-viejo", time.time() - viejo),
+                                                              ("nonce-reciente", time.time() - reciente)])
+        paso(f"se meten en la BD un nonce de hace {viejo} s y otro de hace {reciente} s; luego llega uno nuevo")
         self.assertTrue(datos.registrar_nonce("nonce-nuevo"))
-        quedan = {n for (n,) in sqlite3.connect(os.path.join(self.tmp, "test.db")).execute(
-            "SELECT nonce FROM nonces WHERE nonce IN ('nonce-viejo', 'nonce-reciente')")}
+        quedan = {n for (n,) in bd.execute("SELECT nonce FROM nonces WHERE nonce IN ('nonce-viejo', 'nonce-reciente')")}
         self.assertEqual(quedan, {"nonce-reciente"})
         ok("el viejo se ha borrado y el reciente sigue (aún podría servir para un replay)")
 
     # ---------- RS4: tiempo constante ----------
 
     def test_comparaciones_en_tiempo_constante(self):
-        """RS4 — Firmas de mensajes, prueba de login y firmas de filas se comparan con compare_digest.
-        Esperado: cada una de las tres comprobaciones llama a hmac.compare_digest."""
-        msg = generador.transferencia("ab" * 32, b"k" * 32, ORIGEN, DESTINO, 10)
-        paso("se espía hmac.compare_digest y se llama a verify_mac, comprobar_prueba_login y fila_integra")
+        """RS4 — En el servidor, la prueba de login y las firmas de filas se comparan con compare_digest.
+        Esperado: las dos comprobaciones llaman a hmac.compare_digest (verify_mac lo prueba test_protocolo)."""
+        paso("se espía hmac.compare_digest y se llama a comprobar_prueba_login y a fila_integra")
         with mock.patch("hmac.compare_digest", wraps=hmac.compare_digest) as espia:
-            verify_mac(msg, b"k" * 32)
             validacion.comprobar_prueba_login(b"k" * 32, b"s" * 16, b"c" * 16, "00" * 32)
             datos.fila_integra("00" * 32, "alice")
-        self.assertEqual(espia.call_count, 3)
-        ok("las tres comparaciones de secretos pasan por compare_digest")
+        self.assertEqual(espia.call_count, 2)
+        ok("las dos comparaciones de secretos pasan por compare_digest")
 
     # ---------- sesiones ----------
 
@@ -330,12 +332,12 @@ class TestSeguridad(unittest.TestCase):
         self.assertEqual(datos.filas_corruptas(), [])
         ok("filas_corruptas() = [] (todo íntegro)")
         paso("un atacante con acceso a la BD cambia amount 75 -> 75000 saltándose al servidor")
-        with sqlite3.connect(os.path.join(self.tmp, "test.db")) as bd:
+        with sqlite3.connect(self.db) as bd:
             bd.execute("UPDATE transactions SET amount = 75000 WHERE tx_id = ?", (msg["payload"]["tx_id"],))
         corruptas = datos.filas_corruptas()
         self.assertEqual(corruptas, [f"transactions/{msg['payload']['tx_id']}"])
         ok(f"detectado al comprobar la firma de la fila: {corruptas}")
-        with sqlite3.connect(os.path.join(self.tmp, "test.db")) as bd:  # se deja como estaba
+        with sqlite3.connect(self.db) as bd:  # se deja como estaba
             bd.execute("UPDATE transactions SET amount = 75 WHERE tx_id = ?", (msg["payload"]["tx_id"],))
 
     def test_manipular_bloqueo_se_detecta(self):
@@ -345,11 +347,11 @@ class TestSeguridad(unittest.TestCase):
         paso("'frank' registrado; su fila está íntegra")
         self.assertNotIn("users/frank", datos.filas_corruptas())
         paso("un atacante pone failed=99, locked_until=0 en la BD para 'desbloquear' a mano")
-        with sqlite3.connect(os.path.join(self.tmp, "test.db")) as bd:
+        with sqlite3.connect(self.db) as bd:
             bd.execute("UPDATE users SET failed = 99, locked_until = 0 WHERE username = 'frank'")
         self.assertIn("users/frank", datos.filas_corruptas())
         ok("detectado: la fila users/frank aparece como manipulada")
-        with sqlite3.connect(os.path.join(self.tmp, "test.db")) as bd:  # se deja como estaba
+        with sqlite3.connect(self.db) as bd:  # se deja como estaba
             bd.execute("UPDATE users SET failed = 0 WHERE username = 'frank'")
 
 

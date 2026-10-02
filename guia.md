@@ -397,7 +397,7 @@ Inserta el usuario con su `row_mac`. Devuelve `False` si ya existía: la `PRIMAR
 Devuelve `(salt, clave, bloqueado_hasta, fila_integra)`, o `None` si el usuario no existe. El último valor dice si su `row_mac` cuadra.
 
 **`apuntar_fallo(usuario, max_fallos, bloqueo_seg)`**
-Suma 1 a `failed`. Si llega a `max_fallos`, pone `failed = 0` y `locked_until = ahora + bloqueo_seg`. Se hace con dos `UPDATE` en SQL para que el contador sea correcto aunque haya varios intentos a la vez.
+Suma 1 a `failed`. Si llega a `max_fallos`, pone `failed = 0` y `locked_until = ahora + bloqueo_seg` (esa regla está en `tras_fallo`, que también usa el login de usuarios inexistentes). Se hace con dos `UPDATE` en SQL para que el contador sea correcto aunque haya varios intentos a la vez.
 
 **`limpiar_fallos(usuario)`**
 Pone `failed = 0`. Se llama tras un login correcto, porque el bloqueo es por fallos **seguidos**.
@@ -468,7 +468,7 @@ Devuelve el `salt` del usuario y un `server_nonce` nuevo, y guarda `(usuario, se
 **`login(msg, estado) -> (respuesta, clave_sesion)`**
 1. Saca el reto de `estado`. Un reto sirve para **un solo intento**, así que se borra al usarlo. Si no hay reto, o es de otro usuario: `hay que pedir LOGIN_INIT antes de LOGIN`.
 2. Los pasos 3 a 6 se hacen con `_candado_login` cogido. Si no, N `LOGIN` en paralelo leerían a la vez "no bloqueado" y se podrían probar más de 5 contraseñas.
-3. Lee el usuario de la BD. Si no existe, `_fallo_inexistente` lleva su cuenta de fallos en memoria y lo "bloquea" igual que a uno real. Así el mensaje de bloqueo no delata qué usuarios existen. Responde `credenciales incorrectas`, o `usuario bloqueado …` al sexto intento.
+3. Lee el usuario de la BD. Si no existe, se lleva su cuenta de fallos en la tabla `fallos_inexistentes` (`datos.apuntar_fallo_inexistente`, con la misma regla `tras_fallo`) y lo "bloquea" igual que a uno real. Así el mensaje de bloqueo no delata qué usuarios existen. Responde `credenciales incorrectas`, o `usuario bloqueado …` al sexto intento.
 4. Si su `row_mac` no cuadra: `error de integridad en la cuenta`, y se apunta un `ERROR` en el log.
 5. Si está bloqueado: `usuario bloqueado N s por demasiados intentos`.
 6. Comprueba la `proof`. Si falla, llama a `apuntar_fallo` y responde `credenciales incorrectas`.
@@ -496,7 +496,7 @@ Cómo gestiona los errores:
 - `ValueError`, `KeyError`, `TypeError` o `AttributeError` (JSON roto, campos que faltan, tipos raros) → responde `trama mal formada` **y sigue atendiendo**. Una trama basura no tumba el servidor ni corta la conexión.
 - `ConnectionError` (el cliente se fue de golpe) o `TimeoutError` → termina sin ruido.
 
-`timeout = SESSION_TTL`: una conexión que pasa 30 minutos sin mandar nada se corta. Si no, un cliente que abre el socket y se queda callado retendría su hilo para siempre.
+`timeout = INACTIVIDAD` (30 min): una conexión que pasa ese tiempo sin mandar nada se corta. Si no, un cliente que abre el socket y se queda callado retendría su hilo para siempre.
 
 ### 6.6 `servidor/main.py`: arranque
 
@@ -681,7 +681,7 @@ dumpcap -i lo -f 'tcp port 5000 or tcp port 5001' -w evidencias/pcap/normal.pcap
   - proxy ↔ servidor (puerto 5000), con el importe cambiado **y el mismo `hmac`**.
 
   Ponerlas una al lado de la otra es la mejor prueba para la memoria.
-- **En la captura de replay:** el mismo `nonce` aparece tres veces. La primera se acepta, la segunda (a los pocos segundos) da `nonce repetido` y la tercera (pasados 120 s) da `timestamp fuera de la ventana permitida`.
+- **En la captura de replay:** el mismo `nonce` aparece cuatro veces. Las dos primeras son la transferencia legítima (cliente → proxy por el 5001 y proxy → servidor por el 5000), que se acepta. La tercera es el reenvío a los 5 s, que da `nonce repetido`, y la cuarta el reenvío pasados 120 s, que da `timestamp fuera de la ventana permitida`. El `servidor.log` de `evidencias/logs/` es de la misma sesión que las tres capturas.
 - **Qué comentar en la memoria**, no basta con pegar la imagen:
   - la contraseña **no aparece** en el login (solo en el registro);
   - cada mensaje lleva `nonce`, `timestamp` y `hmac`;
@@ -761,6 +761,7 @@ Arranca un **servidor de verdad** en un puerto libre, con una BD temporal, y hab
 
 ```sql
 users(username PK, salt, key, row_mac, failed, locked_until)
+fallos_inexistentes(username PK, failed, locked_until)
 nonces(nonce PK, seen_at)
 transactions(tx_id PK, origin, dest, amount, currency, ts, username, row_mac)
 ```
@@ -771,6 +772,7 @@ transactions(tx_id PK, origin, dest, amount, currency, ts, username, row_mac)
 | `users.key` | `PBKDF2(password, salt)`, 32 bytes. **No es la contraseña** |
 | `users.row_mac` | Firma de `(username, salt, key, failed, locked_until)` con la clave del servidor |
 | `users.failed` / `locked_until` | Fallos seguidos y hasta cuándo está bloqueado (hora Unix) |
+| `fallos_inexistentes` | Fallos y bloqueo de nombres que **no** existen, con la misma regla que `users`. Así el bloqueo no delata qué usuarios existen, ni siquiera tras reiniciar el servidor |
 | `nonces.seen_at` | Cuándo se vio el nonce. Los de más de 240 s se borran solos |
 | `transactions.ts` | Timestamp del mensaje con el que llegó la transferencia |
 | `transactions.row_mac` | Firma de toda la fila con la clave del servidor |

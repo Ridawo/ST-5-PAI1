@@ -154,7 +154,7 @@ Hay una captura por escenario en `evidencias/pcap/`: `normal.pcap`, `ataque_mitm
 | RF1d Sesiones y logout | `servidor/datos.py` → `crear_sesion`, `leer_sesion`, `borrar_sesion`; `negocio.py` → `LOGOUT` |
 | RF2 Transacciones | `cliente/generador.py` → `transferencia`; `servidor/negocio.py` → `validar_transaccion`, `transferir` |
 | RS1a PBKDF2 + salt | `comun/protocolo.py` → `derive_key`; `servidor/negocio.py` → `registrar` |
-| RS1b Bloqueo por fallos | `servidor/datos.py` → `apuntar_fallo`; `servidor/negocio.py` → `login`, `_fallo_inexistente` |
+| RS1b Bloqueo por fallos | `servidor/datos.py` → `apuntar_fallo`; `servidor/negocio.py` → `login` (también para usuarios inexistentes) |
 | RS2a HMAC-SHA256 | `comun/protocolo.py` → `mac`, `canonical`, `sign`, `verify_mac` |
 | RS2b Claves de 256 bits con CSPRNG | `secrets` en `datos.py` (clave del servidor y `session_id`), `negocio.py` (salt y `server_nonce`), `generador.py` (`client_nonce`) y `protocolo.py` (`nonce`) |
 | RS3 Nonce + timestamp | `servidor/validacion.py` → `verificar_mensaje`; `servidor/datos.py` → `registrar_nonce` |

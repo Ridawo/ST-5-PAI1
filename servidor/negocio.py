@@ -26,7 +26,6 @@ IBAN = re.compile(r"[A-Z]{2}\d{22}")
 log = logging.getLogger("secbank")
 
 _candado_login = threading.Lock()  # bloqueo + prueba + fallo de una vez: si no, N LOGIN en paralelo se saltan el límite
-_inexistentes = {}                 # usuario que no existe -> (fallos, bloqueado_hasta), solo en memoria
 
 
 def atender(msg, estado):
@@ -90,7 +89,10 @@ def login(msg, estado):
     with _candado_login:
         fila = datos.leer_usuario(usuario)
         if fila is None:
-            _fallo_inexistente(usuario)
+            # Se bloquea igual que una cuenta real: si no, el mensaje de bloqueo delataría qué usuarios existen
+            _comprobar_bloqueo(datos.bloqueo_inexistente(usuario))
+            datos.apuntar_fallo_inexistente(usuario, MAX_FALLOS, BLOQUEO_SEG)
+            raise Rechazado("credenciales incorrectas")
         _, clave, bloqueado_hasta, integra = fila
         if not integra:
             log.error("INTEGRIDAD BD: credenciales de %s manipuladas", usuario)
@@ -111,20 +113,6 @@ def login(msg, estado):
 def _comprobar_bloqueo(bloqueado_hasta):
     if bloqueado_hasta > time.time():
         raise Rechazado(f"usuario bloqueado {int(bloqueado_hasta - time.time())} s por demasiados intentos")
-
-
-def _fallo_inexistente(usuario):
-    """Un usuario que no existe se bloquea igual que uno real tras MAX_FALLOS fallos: si no,
-    que salga o no el mensaje de bloqueo delataría qué usuarios existen. Siempre lanza Rechazado."""
-    fallos, bloqueado_hasta = _inexistentes.get(usuario, (0, 0.0))
-    _comprobar_bloqueo(bloqueado_hasta)
-    fallos += 1
-    if fallos >= MAX_FALLOS:
-        fallos, bloqueado_hasta = 0, time.time() + BLOQUEO_SEG
-    if len(_inexistentes) >= 10_000:  # tope de memoria; olvidarlos no es un riesgo: no protegen ninguna cuenta
-        _inexistentes.clear()
-    _inexistentes[usuario] = (fallos, bloqueado_hasta)
-    raise Rechazado("credenciales incorrectas")
 
 
 # ---------- transacciones ----------
