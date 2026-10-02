@@ -1,6 +1,5 @@
 # Tests del protocolo: firma canónica, verificación de MAC y tramas mal formadas.
 # Ejecutar desde la raíz: python -m unittest discover tests -v
-# Cada test imprime qué comprueba y su resultado, para poder seguirlo y evaluarlo sin leer el código.
 import hmac
 import io
 import json
@@ -108,7 +107,7 @@ class TestProtocolo(unittest.TestCase):
             ok("rechazado sin romperse")
 
     def test_verify_mac_usa_compare_digest(self):
-        """RS4 — verify_mac compara las firmas con hmac.compare_digest (tiempo constante), nunca con ==.
+        """RS4: verify_mac compara las firmas con hmac.compare_digest (tiempo constante), nunca con ==.
         Esperado: compare_digest se llama una vez en cada verificación, acierte o falle."""
         msg = sign({"a": 1}, CLAVE)
         paso("se espía hmac.compare_digest y se verifica un mensaje con la clave buena y con una mala")
@@ -126,7 +125,7 @@ class TestProtocolo(unittest.TestCase):
         ok("nonces distintos en cada firma")
 
     def test_derivacion_con_salt(self):
-        """RS1a — derive_key (PBKDF2) da una clave de 32 bytes, determinista por (password, salt).
+        """RS1a: derive_key (PBKDF2) da una clave de 32 bytes, determinista por (password, salt).
         Esperado: misma entrada -> misma clave; mismo password con otro salt -> otra clave."""
         k = derive_key("secreto123", b"s" * 16)
         paso(f"clave derivada de ('secreto123', salt 's') -> {len(k)} bytes")

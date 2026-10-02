@@ -25,7 +25,7 @@ IBAN = re.compile(r"[A-Z]{2}\d{22}")
 
 log = logging.getLogger("secbank")
 
-_candado_login = threading.Lock()  # bloqueo + prueba + fallo de una vez: si no, N LOGIN en paralelo se saltan el límite
+_candado_login = threading.Lock()  # para que varios logins a la vez no se salten el límite de intentos
 
 
 def atender(msg, estado):
@@ -120,7 +120,7 @@ def _comprobar_bloqueo(bloqueado_hasta):
 def validar_transaccion(p):
     try:
         tx = uuid.UUID(str(p["tx_id"]))
-        # Solo forma canónica: el PRIMARY KEY compara texto y otra grafía del mismo UUID colaría como tx nueva
+        # tiene que venir en minúsculas y con guiones, si no la misma tx escrita distinto pasaría como nueva
         if tx.version != 4 or str(tx) != p["tx_id"]:
             raise ValueError
     except ValueError:
@@ -142,7 +142,7 @@ def transferir(msg):
     usuario, clave = verificar_mensaje(msg)  # sesión, MAC, timestamp y nonce
     p = msg["payload"]
     validar_transaccion(p)
-    # ponytail: no se comprueba que origin_account sea del usuario; el enunciado no define cuentas
+    # no se comprueba que la cuenta origen sea del usuario porque no tenemos tabla de cuentas
     if not datos.guardar_transaccion(p["tx_id"], p["origin_account"], p["destination_account"],
                                      p["amount"], p["currency"], msg["timestamp"], usuario):
         raise Rechazado("tx_id repetido")

@@ -5,9 +5,8 @@ Todo lo que guarda el servidor:
 - Las sesiones activas van en memoria: nunca tocan el disco, así que nadie puede editarlas.
 
 Cada fila de users y de transactions lleva un row_mac = HMAC(clave del servidor, fila).
-Si alguien abre el .db y cambia un importe a mano, el row_mac deja de cuadrar y se detecta.
-En users el MAC cubre también el contador de fallos y el bloqueo (failed, locked_until),
-así que tampoco se puede desbloquear una cuenta ni resetear los intentos editando la BD.
+En users el MAC incluye también failed y locked_until, para que no se pueda desbloquear
+una cuenta editando la BD.
 La clave del servidor está en un fichero aparte (servidor.key), nunca dentro de la BD.
 """
 import hmac
@@ -53,7 +52,7 @@ CREATE TABLE IF NOT EXISTS transactions(
 """
 
 _db = None
-_lock = threading.Lock()  # ponytail: un solo lock para toda la BD; con muchos clientes a la vez haría falta un pool
+_lock = threading.Lock()  # un solo lock para toda la BD; con muchos clientes a la vez haría falta un pool
 _sesiones = {}            # session_id -> (usuario, clave_sesion, caduca_en)
 clave_servidor = b""
 
@@ -105,11 +104,8 @@ def crear_usuario(usuario, salt, clave) -> bool:
 
 
 def _resellar_usuario(usuario) -> None:
-    """Recalcula el row_mac con los valores actuales de la fila. Se llama dentro de una
-    transacción ya abierta (con el lock tomado), tras crear el usuario o cambiar failed/
-    locked_until, para que también el estado de bloqueo quede protegido por el MAC.
-    Firma los valores tal y como los devuelve SQLite (int para failed, float para
-    locked_until), que son los mismos que luego se leen al verificar."""
+    """Vuelve a calcular el row_mac del usuario con lo que hay en la fila.
+    Hay que llamarla con el lock cogido y dentro de la transacción."""
     salt, clave, failed, locked = _db.execute(
         "SELECT salt, key, failed, locked_until FROM users WHERE username=?", (usuario,)).fetchone()
     _db.execute("UPDATE users SET row_mac=? WHERE username=?",

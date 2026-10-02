@@ -7,7 +7,7 @@ from servidor.negocio import atender
 from servidor.validacion import Rechazado
 
 log = logging.getLogger("secbank")
-INACTIVIDAD = 30 * 60  # s; una conexión callada tanto tiempo se corta: si no, retendría su hilo para siempre
+INACTIVIDAD = 30 * 60  # segundos sin recibir nada antes de cortar la conexión
 
 
 class Manejador(socketserver.StreamRequestHandler):

@@ -11,7 +11,7 @@ class Rechazado(Exception):
 
 
 def comprobar_prueba_login(clave, server_nonce, client_nonce, prueba) -> bool:
-    """El cliente demuestra que conoce la contraseña sin enviarla: manda HMAC(K, sn‖cn)."""
+    """Comprueba la prueba del login: HMAC(clave, server_nonce + client_nonce)."""
     esperado = mac(clave, server_nonce + client_nonce).hex().encode()
     return hmac.compare_digest(esperado, str(prueba).encode())  # tiempo constante (RS4)
 

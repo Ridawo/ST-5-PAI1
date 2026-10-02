@@ -32,7 +32,7 @@ def main():
     for fila in datos.filas_corruptas():
         log.error("INTEGRIDAD BD: la fila %s ha sido manipulada", fila)
 
-    # En Windows SO_REUSEADDR deja que otro proceso "robe" el puerto, así que solo se activa en Linux
+    # reuse_address solo fuera de Windows (allí deja que otro proceso use el mismo puerto)
     socketserver.ThreadingTCPServer.allow_reuse_address = os.name != "nt"
     socketserver.ThreadingTCPServer.daemon_threads = True
     with socketserver.ThreadingTCPServer((host, puerto), Manejador) as srv:

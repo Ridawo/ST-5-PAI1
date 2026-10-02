@@ -23,7 +23,7 @@ def derive_key(password: str, salt: bytes) -> bytes:
 
 
 def mac(key: bytes, data: bytes) -> bytes:
-    """HMAC-SHA256: 32 bytes que solo puede calcular quien tenga la clave."""
+    """HMAC-SHA256 de data con la clave."""
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
@@ -36,16 +36,15 @@ def canonical(msg: dict) -> bytes:
 
 
 def sign(msg: dict, key: bytes) -> dict:
-    """Añade nonce, timestamp y HMAC. El nonce y el timestamp entran dentro de la firma
-    (principio de Horton): si alguien los cambia para colar un replay, el MAC deja de cuadrar."""
+    """Añade nonce, timestamp y HMAC. El nonce y el timestamp también se firman,
+    si no se podrían cambiar para hacer un replay."""
     msg = dict(msg, nonce=secrets.token_hex(16), timestamp=int(time.time()))
     msg["hmac"] = mac(key, canonical(msg)).hex()
     return msg
 
 
 def verify_mac(msg: dict, key: bytes) -> bool:
-    """RS4: hmac.compare_digest tarda lo mismo acierte o falle, así un atacante no puede ir
-    adivinando la firma byte a byte midiendo microsegundos (un == normal para en el primer fallo)."""
+    """Comprueba el HMAC del mensaje. Se usa compare_digest para evitar timing attacks (RS4)."""
     esperado = mac(key, canonical(msg)).hex().encode()
     return hmac.compare_digest(esperado, str(msg.get("hmac", "")).encode())
 

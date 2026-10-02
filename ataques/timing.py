@@ -33,8 +33,8 @@ def main():
     print(f"{'% acertado':>11} | {'== (µs)':>9} | {'compare_digest (µs)':>20}")
     for porcentaje in (0, 10, 25, 50, 75, 90, 100):
         n = LONGITUD * porcentaje // 100
-        # "x" no es hexadecimal: falla justo en el byte n. bytearray fuerza una copia: si fuera el mismo
-        # objeto que SECRETO, Python ni compararía (atajo por identidad) y la medida del 100% saldría falsa
+        # "x" no es hex, así que falla justo en el byte n. Se copia para que no sea el mismo
+        # objeto que SECRETO (si lo es, el == devuelve True sin comparar)
         candidato = bytes(bytearray(SECRETO[:n] + b"x" * (LONGITUD - n)))
         t_igual = medir(lambda a, b: a == b, candidato)
         t_cd = medir(hmac.compare_digest, candidato)

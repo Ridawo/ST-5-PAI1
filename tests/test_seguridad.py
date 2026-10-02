@@ -1,8 +1,7 @@
 # Tests de seguridad: MAC alterado, nonce repetido, timestamp caducado, bloqueo por intentos, usuario duplicado.
 # Ejecutar desde la raíz: python -m unittest discover tests -v
 # Arrancan un servidor de verdad en un puerto libre con una BD temporal y hablan con él por TCP.
-# Cada test imprime qué requisito comprueba, qué hace y qué responde el servidor, para que
-# se pueda seguir y evaluar sin leer el código. Las líneas "[srv]" son el log del servidor real.
+# Las líneas "[srv]" que salen con -v son el log del servidor.
 import hmac
 import logging
 import os
@@ -13,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from unittest import mock
 
 from cliente import generador
@@ -82,7 +82,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- RS1: credenciales ----------
 
     def test_registro_y_duplicado(self):
-        """RF1a / RF1c — Registro de usuario y rechazo de duplicados.
+        """RF1a / RF1c: registro de usuario y rechazo de duplicados.
         Esperado: el primer registro es OK; repetir el mismo usuario da 'ya existe'."""
         paso("registro de 'dave' por primera vez")
         r1 = self.con.pedir(generador.registro("dave", "dave12345"))
@@ -94,9 +94,10 @@ class TestSeguridad(unittest.TestCase):
         ok(f"rechazado: {resp['reason']}")
 
     def test_password_guardada_con_salt_y_no_en_claro(self):
-        """RS1a — Las contraseñas nunca se guardan en claro: se derivan con PBKDF2 y salt.
+        """RS1a: las contraseñas nunca se guardan en claro: se derivan con PBKDF2 y salt.
         Esperado: cada usuario con su propio salt y una clave de 32 bytes; la contraseña no aparece."""
-        filas = sqlite3.connect(self.db).execute("SELECT salt, key FROM users").fetchall()
+        with closing(sqlite3.connect(self.db)) as bd:
+            filas = bd.execute("SELECT salt, key FROM users").fetchall()
         paso(f"leídas {len(filas)} filas de la tabla users directamente de SQLite")
         self.assertEqual(len({s for s, _ in filas}), len(filas))  # cada usuario con su propio salt
         ok(f"{len({s for s, _ in filas})} salts distintos para {len(filas)} usuarios (cada uno el suyo)")
@@ -104,7 +105,7 @@ class TestSeguridad(unittest.TestCase):
         ok("cada clave son 32 bytes derivados (PBKDF2) y no contienen la contraseña en claro")
 
     def test_login_correcto_con_respuesta_firmada(self):
-        """RS2 — Login correcto y la respuesta del servidor llega firmada.
+        """RF1, RS2: login correcto y la respuesta del servidor llega firmada.
         Esperado: status OK y el HMAC de la respuesta verifica con la clave de sesión."""
         paso("alice hace LOGIN_INIT + LOGIN con su contraseña correcta")
         resp, clave = self.login()
@@ -114,7 +115,7 @@ class TestSeguridad(unittest.TestCase):
         ok("la respuesta trae un HMAC válido con la clave de sesión (un OK no se puede falsificar)")
 
     def test_login_mal_y_usuario_inexistente(self):
-        """RS1 — Contraseña incorrecta y usuario inexistente se rechazan con el mismo mensaje.
+        """RS1: contraseña incorrecta y usuario inexistente se rechazan con el mismo mensaje.
         Esperado: 'credenciales incorrectas' en ambos casos (no se filtra si el usuario existe)."""
         paso("login de alice con contraseña incorrecta")
         r1 = self.login(password="mala12345")[0]["reason"]
@@ -126,7 +127,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"rechazado: {r2} (mismo mensaje: no se revela si el usuario existe)")
 
     def test_bloqueo_tras_5_fallos(self):
-        """RS1b — 5 contraseñas incorrectas seguidas bloquean la cuenta.
+        """RS1b: 5 contraseñas incorrectas seguidas bloquean la cuenta.
         Esperado: tras MAX_FALLOS fallos, ni con la contraseña correcta se puede entrar."""
         self.con.pedir(generador.registro("eve", "eve123456"))
         paso(f"'eve' registrada; se falla el login {negocio.MAX_FALLOS} veces seguidas")
@@ -139,7 +140,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"aun así se rechaza: {resp['reason']}")
 
     def test_bloqueo_usuario_inexistente(self):
-        """RS1b — Un usuario que no existe también se 'bloquea' tras 5 fallos, como uno real.
+        """RS1b: un usuario que no existe también se 'bloquea' tras 5 fallos, como uno real.
         Esperado: el mismo patrón de respuestas, así el bloqueo no delata qué usuarios existen."""
         def intento():  # sin PBKDF2: con un usuario inexistente da igual la prueba que se mande
             self.con.pedir(generador.login_init("fantasma"))
@@ -153,7 +154,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"al sexto intento: {motivo} (igual que con una cuenta real)")
 
     def test_login_sin_reto(self):
-        """RS3 — No se puede hacer LOGIN sin pedir antes LOGIN_INIT (el reto del servidor).
+        """Protocolo: no se puede hacer LOGIN sin pedir antes LOGIN_INIT (el reto del servidor).
         Esperado: el servidor exige LOGIN_INIT previo."""
         paso("se envía un LOGIN con un reto inventado, sin pedir LOGIN_INIT")
         msg, _ = generador.login("alice", "alice1234", "00" * 16, "00" * 16)
@@ -164,7 +165,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- RS2: integridad y autenticidad ----------
 
     def test_transferencia_correcta(self):
-        """RF2 — Una transferencia bien formada y firmada se acepta y responde firmada.
+        """RF2: una transferencia bien formada y firmada se acepta y responde firmada.
         Esperado: status OK, tx_id que coincide y respuesta con HMAC válido."""
         sid, clave = self.sesion()
         paso("alice, ya con sesión, firma y envía una TRANSFER de 1500.50 EUR")
@@ -177,7 +178,7 @@ class TestSeguridad(unittest.TestCase):
         ok("la confirmación viene firmada con la clave de sesión")
 
     def test_mitm_importe_alterado(self):
-        """RS2 — Man-in-the-Middle: cambiar el importe de una TRANSFER ya firmada rompe el HMAC.
+        """RS2 (MitM): cambiar el importe de una TRANSFER ya firmada rompe el HMAC.
         Esperado: el servidor detecta la alteración y responde 'MAC inválido'."""
         sid, clave = self.sesion()
         msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 200)
@@ -189,7 +190,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"servidor: {resp['reason']}")
 
     def test_mitm_mac_falsificado(self):
-        """RS2 — Falsificar el HMAC con otra clave tampoco cuela.
+        """RS2: falsificar el HMAC con otra clave tampoco cuela.
         Esperado: como la clave del atacante no es la de sesión, el MAC no verifica."""
         sid, clave = self.sesion()
         msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 200)
@@ -200,7 +201,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"servidor: {resp['reason']}")
 
     def test_transaccion_con_datos_invalidos(self):
-        """RF2 — Validación de datos de la transferencia.
+        """RF2: validación de datos de la transferencia.
         Esperado: rechazo con IBAN mal formado, importe negativo, más de 2 decimales u origen=destino."""
         sid, clave = self.sesion()
         casos = {
@@ -216,7 +217,7 @@ class TestSeguridad(unittest.TestCase):
             ok(f"rechazado: {resp['reason']}")
 
     def test_tx_id_no_canonico_se_rechaza(self):
-        """RF2 — El tx_id solo vale en forma canónica: el mismo UUID escrito de otra forma no es otra transacción.
+        """RF2: el tx_id solo vale en forma canónica: el mismo UUID escrito de otra forma no es otra transacción.
         Esperado: tx_id en mayúsculas, entre llaves, con 'urn:uuid:' o sin guiones se rechaza por el tx_id."""
         sid, clave = self.sesion()
         msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 10)
@@ -235,7 +236,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- RS3: replay ----------
 
     def test_replay_nonce_repetido(self):
-        """RS3 — Reenviar una TRANSFER válida (ataque de replay) se detecta por el nonce repetido.
+        """RS3: reenviar una TRANSFER válida (ataque de replay) se detecta por el nonce repetido.
         Esperado: la primera pasa; la copia reenviada da 'nonce repetido'."""
         sid, clave = self.sesion()
         msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 50)
@@ -257,7 +258,7 @@ class TestSeguridad(unittest.TestCase):
         return msg
 
     def test_replay_timestamp_caducado(self):
-        """RS3 — Un mensaje fuera de la ventana de TIME_WINDOW s se rechaza aunque esté bien firmado.
+        """RS3: un mensaje fuera de la ventana de TIME_WINDOW s se rechaza aunque esté bien firmado.
         Esperado: 'timestamp fuera de la ventana' si es de hace 5 min y también si viene 5 min del futuro."""
         sid, clave = self.sesion()
         for desfase in (-300, 300):
@@ -267,7 +268,7 @@ class TestSeguridad(unittest.TestCase):
             ok(f"servidor: {resp['reason']}")
 
     def test_timestamp_dentro_de_la_ventana_se_acepta(self):
-        """RS3 — La ventana tolera relojes desfasados hasta TIME_WINDOW segundos.
+        """RS3: la ventana tolera relojes desfasados hasta TIME_WINDOW segundos.
         Esperado: un mensaje 20 s dentro del límite, atrasado o adelantado, se acepta."""
         sid, clave = self.sesion()
         for desfase in (-(TIME_WINDOW - 20), TIME_WINDOW - 20):
@@ -277,22 +278,23 @@ class TestSeguridad(unittest.TestCase):
             ok("aceptada")
 
     def test_nonces_antiguos_se_borran(self):
-        """RS3 — La tabla de nonces no crece sin fin: los de más de 2 ventanas se borran solos.
+        """RS3: la tabla de nonces no crece sin fin: los de más de 2 ventanas se borran solos.
         Esperado: al registrar un nonce nuevo desaparece uno de justo antes del límite y se conserva uno posterior."""
         viejo, reciente = 2 * TIME_WINDOW + 5, 2 * TIME_WINDOW - 40
-        with sqlite3.connect(self.db) as bd:
+        with closing(sqlite3.connect(self.db)) as bd, bd:
             bd.executemany("INSERT INTO nonces VALUES (?,?)", [("nonce-viejo", time.time() - viejo),
                                                               ("nonce-reciente", time.time() - reciente)])
         paso(f"se meten en la BD un nonce de hace {viejo} s y otro de hace {reciente} s; luego llega uno nuevo")
         self.assertTrue(datos.registrar_nonce("nonce-nuevo"))
-        quedan = {n for (n,) in bd.execute("SELECT nonce FROM nonces WHERE nonce IN ('nonce-viejo', 'nonce-reciente')")}
+        with closing(sqlite3.connect(self.db)) as bd:
+            quedan = {n for (n,) in bd.execute("SELECT nonce FROM nonces WHERE nonce IN ('nonce-viejo', 'nonce-reciente')")}
         self.assertEqual(quedan, {"nonce-reciente"})
         ok("el viejo se ha borrado y el reciente sigue (aún podría servir para un replay)")
 
     # ---------- RS4: tiempo constante ----------
 
     def test_comparaciones_en_tiempo_constante(self):
-        """RS4 — En el servidor, la prueba de login y las firmas de filas se comparan con compare_digest.
+        """RS4: en el servidor, la prueba de login y las firmas de filas se comparan con compare_digest.
         Esperado: las dos comprobaciones llaman a hmac.compare_digest (verify_mac lo prueba test_protocolo)."""
         paso("se espía hmac.compare_digest y se llama a comprobar_prueba_login y a fila_integra")
         with mock.patch("hmac.compare_digest", wraps=hmac.compare_digest) as espia:
@@ -304,7 +306,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- sesiones ----------
 
     def test_logout_invalida_la_sesion(self):
-        """RF1d — Tras LOGOUT la sesión deja de valer.
+        """RF1d: tras LOGOUT la sesión deja de valer.
         Esperado: el logout es OK y transferir después con esa sesión se rechaza."""
         sid, clave = self.sesion()
         paso("alice inicia sesión y hace LOGOUT")
@@ -316,7 +318,7 @@ class TestSeguridad(unittest.TestCase):
         ok(f"rechazado: {resp['reason']}")
 
     def test_sesion_inventada(self):
-        """RF1d — Una session_id inventada no permite operar.
+        """RF1d: una session_id inventada no permite operar.
         Esperado: 'sesión no válida o caducada'."""
         paso("se transfiere con una session_id y una clave inventadas de la nada")
         resp = self.con.pedir(generador.transferencia("ab" * 32, b"x" * 32, ORIGEN, DESTINO, 10))
@@ -326,7 +328,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- robustez ----------
 
     def test_trama_mal_formada_no_tumba_el_servidor(self):
-        """Robustez — Enviar basura por el socket no tumba el servidor.
+        """Robustez: enviar basura por el socket no tumba el servidor.
         Esperado: cada trama inválida devuelve un ERROR y la conexión sigue viva."""
         s = self.con.sock
         for basura in (b"no soy json\n", b"[1,2]\n", b'{"action": "TRANSFER"}\n', b'{"action": 5}\n'):
@@ -340,7 +342,7 @@ class TestSeguridad(unittest.TestCase):
     # ---------- integridad de lo almacenado ----------
 
     def test_manipular_la_bd_se_detecta(self):
-        """Integridad de lo almacenado — Tocar un importe directamente en la BD se detecta.
+        """Integridad de la BD: tocar un importe directamente en la BD se detecta.
         Esperado: filas_corruptas() está vacío al principio y señala la fila tras manipularla."""
         sid, clave = self.sesion()
         msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 75)
@@ -358,7 +360,7 @@ class TestSeguridad(unittest.TestCase):
             bd.execute("UPDATE transactions SET amount = 75 WHERE tx_id = ?", (msg["payload"]["tx_id"],))
 
     def test_manipular_bloqueo_se_detecta(self):
-        """RS1b — El contador de fallos y el bloqueo también van firmados en la BD.
+        """RS1b: el contador de fallos y el bloqueo también van firmados en la BD.
         Esperado: 'desbloquear' una cuenta editando la BD a mano se detecta como manipulación."""
         self.con.pedir(generador.registro("frank", "frank1234"))
         paso("'frank' registrado; su fila está íntegra")
