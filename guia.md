@@ -475,7 +475,7 @@ Devuelve el `salt` del usuario y un `server_nonce` nuevo, y guarda `(usuario, se
 7. Si todo va bien, llama a `limpiar_fallos`, calcula `clave_sesion = HMAC(K, "session" ‖ sn ‖ cn)`, crea la sesión y devuelve el `session_id` firmado con esa clave.
 
 **`validar_transaccion(p)`**
-Comprueba el `payload`: `tx_id` UUIDv4, los dos IBAN con formato válido y distintos entre sí, un importe numérico (no booleano) entre 0 y 1.000.000 con 2 decimales como máximo, y moneda `EUR`. Lanza `Rechazado` con un mensaje claro.
+Comprueba el `payload`: `tx_id` UUIDv4 en forma canónica (minúsculas y con guiones, como sale de `str(uuid.uuid4())`), los dos IBAN con formato válido y distintos entre sí, un importe numérico (no booleano) entre 0 y 1.000.000 con 2 decimales como máximo, y moneda `EUR`. Lanza `Rechazado` con un mensaje claro. Se exige la forma canónica porque el mismo UUID escrito de otra forma (mayúsculas, llaves, `urn:uuid:`, sin guiones) contaría como otra transacción y se saltaría la deduplicación por `tx_id`.
 
 **`transferir(msg) -> (respuesta, clave_sesion)`**
 `verificar_mensaje`, después `validar_transaccion` y después `guardar_transaccion`. Lo apunta en el log (`TRANSFER OK alice …`) y devuelve el `tx_id` firmado.
@@ -692,7 +692,7 @@ dumpcap -i lo -f 'tcp port 5000 or tcp port 5001' -w evidencias/pcap/normal.pcap
 ## 9. Tests
 
 ```bash
-python -m unittest discover tests -v                     # todos: 35 tests, unos 15 s
+python -m unittest discover tests -v                     # todos: 36 tests, unos 15 s
 python -m unittest tests.test_protocolo -v               # solo los del protocolo
 python -m unittest tests.test_seguridad.TestSeguridad.test_replay_nonce_repetido   # uno solo
 ```
@@ -742,6 +742,7 @@ Arranca un **servidor de verdad** en un puerto libre, con una BD temporal, y hab
 | `test_mitm_importe_alterado` | RS2 | Importe cambiado → `MAC inválido` |
 | `test_mitm_mac_falsificado` | RS2 | Firmado con otra clave → `MAC inválido` |
 | `test_transaccion_con_datos_invalidos` | RF2 | IBAN corto, importe negativo, 3 decimales u origen igual a destino → `ERROR` |
+| `test_tx_id_no_canonico_se_rechaza` | RF2 | Un `tx_id` en mayúsculas, con llaves, con `urn:uuid:` o sin guiones → `tx_id debe ser un UUIDv4` |
 | `test_replay_nonce_repetido` | RS3 | El mismo mensaje dos veces → `nonce repetido` |
 | `test_replay_timestamp_caducado` | RS3 | Un mensaje bien firmado de hace 5 min o de dentro de 5 min → `timestamp` |
 | `test_timestamp_dentro_de_la_ventana_se_acepta` | RS3 | Con el reloj 100 s atrasado o adelantado se acepta |

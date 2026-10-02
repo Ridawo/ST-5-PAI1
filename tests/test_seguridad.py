@@ -17,7 +17,7 @@ from unittest import mock
 
 from cliente import generador
 from cliente.conexion import Conexion
-from comun.protocolo import TIME_WINDOW, canonical, mac, verify_mac
+from comun.protocolo import TIME_WINDOW, canonical, mac, sign, verify_mac
 from servidor import datos, negocio, validacion
 from servidor.conexion import Manejador
 
@@ -213,6 +213,23 @@ class TestSeguridad(unittest.TestCase):
             paso(f"caso: {motivo} (origen={origen!r}, importe={importe})")
             resp = self.con.pedir(generador.transferencia(sid, clave, origen, DESTINO, importe))
             self.assertEqual(resp["status"], "ERROR", (origen, importe))
+            ok(f"rechazado: {resp['reason']}")
+
+    def test_tx_id_no_canonico_se_rechaza(self):
+        """RF2 — El tx_id solo vale en forma canónica: el mismo UUID escrito de otra forma no es otra transacción.
+        Esperado: tx_id en mayúsculas, entre llaves, con 'urn:uuid:' o sin guiones se rechaza por el tx_id."""
+        sid, clave = self.sesion()
+        msg = generador.transferencia(sid, clave, ORIGEN, DESTINO, 10)
+        paso("alice hace una TRANSFER de 10 EUR")
+        self.assertEqual(self.con.pedir(msg)["status"], "OK")
+        tx_id = msg["payload"]["tx_id"]
+        ok(f"aceptada, tx_id = {tx_id}")
+        cuerpo = {k: v for k, v in msg.items() if k not in ("nonce", "timestamp", "hmac")}
+        for variante in (tx_id.upper(), "{" + tx_id + "}", "urn:uuid:" + tx_id, tx_id.replace("-", "")):
+            paso(f"la misma TRANSFER con tx_id = {variante!r}, nonce nuevo y bien firmada")
+            resp = self.con.pedir(sign({**cuerpo, "payload": dict(msg["payload"], tx_id=variante)}, clave))
+            self.assertEqual(resp["status"], "ERROR", variante)
+            self.assertIn("UUIDv4", resp["reason"])
             ok(f"rechazado: {resp['reason']}")
 
     # ---------- RS3: replay ----------

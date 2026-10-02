@@ -107,7 +107,7 @@ ok
 ```
 
 Así se ve qué está pasando por dentro en cada caso (login, bloqueo, MitM, replay,
-detección de manipulación de la BD...). Son 35 tests y tardan unos 15 s; casi todo es
+detección de manipulación de la BD...). Son 36 tests y tardan unos 15 s; casi todo es
 PBKDF2, que usa 600.000 iteraciones a propósito.
 
 ## Ataques de demostración

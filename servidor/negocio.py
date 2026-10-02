@@ -119,7 +119,9 @@ def _comprobar_bloqueo(bloqueado_hasta):
 
 def validar_transaccion(p):
     try:
-        if uuid.UUID(str(p["tx_id"])).version != 4:
+        tx = uuid.UUID(str(p["tx_id"]))
+        # Solo forma canónica: el PRIMARY KEY compara texto y otra grafía del mismo UUID colaría como tx nueva
+        if tx.version != 4 or str(tx) != p["tx_id"]:
             raise ValueError
     except ValueError:
         raise Rechazado("tx_id debe ser un UUIDv4")
