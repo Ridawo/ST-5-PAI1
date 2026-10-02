@@ -1,15 +1,15 @@
 # PAI1-ST5 · IntegriDos
 
-Cliente-servidor de transferencias bancarias sobre **TCP crudo sin TLS**. La integridad y la autenticidad se garantizan en la capa de aplicación con HMAC-SHA256, nonces, timestamps y comparación en tiempo constante.
+Cliente-servidor de transferencias bancarias sobre TCP crudo sin TLS. La integridad y la autenticidad se garantizan en la capa de aplicación con HMAC-SHA256, nonces, timestamps y comparación en tiempo constante.
 
-Solo usa la librería estándar de Python (`socket`, `hashlib`, `hmac`, `secrets`, `sqlite3`), así que **no hay que instalar nada**.
+Solo usa la librería estándar de Python (`socket`, `hashlib`, `hmac`, `secrets`, `sqlite3`), así que no hay que instalar nada.
 
 > Documento extenso con demos paso a paso y capturas: [`guia.md`](guia.md).
 
 ## Requisitos
 
-- Python **3.10 o superior** (Linux, macOS o Windows).
-- Todos los comandos se lanzan **desde la raíz del repo**. En Windows, si `python` no funciona, usa `py`.
+- Python 3.10 o superior (Linux, macOS o Windows).
+- Todos los comandos se lanzan desde la raíz del repo. En Windows, si `python` no funciona, usa `py`.
 
 ## Estructura del repositorio
 
@@ -26,8 +26,8 @@ PAI1-ST5/
 │   ├── conexion.py        Manejador TCP: una hebra por cliente, lee tramas y las reparte.
 │   ├── negocio.py         Lógica bancaria: registro, login (reto-respuesta), bloqueo por
 │   │                      fallos, transferencia y logout. Aquí se aplican los requisitos.
-│   ├── validacion.py      Comprobaciones de cada mensaje: MAC, nonce, timestamp, formato.
-│   └── datos.py           Capa SQLite: usuarios, sesiones, transacciones y nonces vistos.
+│   ├── validacion.py      MAC, timestamp y nonce de los mensajes con sesión.
+│   └── datos.py           SQLite (usuarios, transacciones, nonces) y sesiones en memoria.
 │                          Firma cada fila con la clave del servidor para detectar cambios.
 │
 ├── cliente/
@@ -44,7 +44,7 @@ PAI1-ST5/
 │   ├── test_protocolo.py  Tests unitarios de la criptografía (firma, MAC, tramas raras).
 │   └── test_seguridad.py  Tests de extremo a extremo: levanta un servidor real y lo ataca.
 │
-├── docs/                  Memoria de la práctica (máximo 10 páginas) y diagramas.
+├── docs/                  Memoria de la práctica (pendiente).
 ├── evidencias/            Salidas para el entregable (log del servidor y capturas .pcap).
 ├── guia.md                Guía completa: teoría, demos paso a paso y solución de problemas.
 ├── planteamiento.md       Decisiones de diseño y reparto de la práctica.
@@ -52,23 +52,23 @@ PAI1-ST5/
 ```
 
 `secbank.db` (la base de datos) y `servidor.key` (la clave con la que el servidor firma
-las filas) **no están en el repo**: se generan solos en el primer arranque.
+las filas) no están en el repo: se generan solos en el primer arranque.
 
-## Guía rápida (para corregir)
+## Puesta en marcha
 
-**1. Arrancar el servidor** (crea `secbank.db` y `servidor.key` la primera vez):
+1. Arrancar el servidor (crea `secbank.db` y `servidor.key` la primera vez):
 
 ```bash
 python -m servidor.main              # escucha en 127.0.0.1:5000
 ```
 
-**2. En otra terminal, el cliente:**
+2. En otra terminal, el cliente:
 
 ```bash
 python -m cliente.interfaz           # menú en consola
 ```
 
-**3. Usuarios de prueba ya sembrados:**
+3. Usuarios de prueba ya sembrados:
 
 | Usuario | Contraseña |
 |---|---|
@@ -86,13 +86,13 @@ El log del servidor se escribe a la vez en consola y en `evidencias/logs/servido
 python -m unittest discover tests -v
 ```
 
-Los tests de `test_seguridad.py` **levantan un servidor real** en un puerto libre con una
-BD temporal y hablan con él por TCP. Con `-v` verás, intercalada con cada test, la
+Los tests de `test_seguridad.py` levantan un servidor real en un puerto libre con una
+BD temporal y hablan con él por TCP. Con `-v` se ve, intercalada con cada test, la
 actividad del servidor prefijada con `[srv]`:
 
 ```
 ▶ test_bloqueo_tras_5_fallos
-  RS1b — 5 contraseñas incorrectas seguidas bloquean la cuenta.
+  RS1b: 5 contraseñas incorrectas seguidas bloquean la cuenta.
   Esperado: tras MAX_FALLOS fallos, ni con la contraseña correcta se puede entrar.
 ──────────────────────────────────────────────────────────────────────────
     · 'eve' registrada; se falla el login 5 veces seguidas
@@ -106,27 +106,25 @@ actividad del servidor prefijada con `[srv]`:
 ok
 ```
 
-Así se ve qué está pasando por dentro en cada caso (login, bloqueo, MitM, replay,
-detección de manipulación de la BD...). Son 36 tests y tardan unos 15 s; casi todo es
-PBKDF2, que usa 600.000 iteraciones a propósito.
+Son 36 tests y tardan unos 15 s, casi todo por las 600.000 iteraciones de PBKDF2.
 
 ## Ataques de demostración
 
-Los tres confirman que las defensas hacen su trabajo. (Detalle paso a paso en `guia.md`.)
+El paso a paso de cada demo está en la sección 7 de `guia.md`.
 
 | Ataque | Cómo | Resultado esperado |
 |---|---|---|
 | MitM | `python -m ataques.mitm_proxy` y el cliente con `python -m cliente.interfaz 127.0.0.1 5001` | El proxy multiplica el importe por 100 y cambia el destino. El servidor responde `MAC inválido`. |
-| Replay | 1. `python -m ataques.mitm_proxy --pasivo`, conectas el cliente al 5001 y haces una transferencia. 2. **Sin cerrar sesión**, lanzas `python -m ataques.replay` | `nonce repetido` si han pasado menos de 120 s; `timestamp fuera de la ventana` si han pasado más. |
+| Replay | 1. `python -m ataques.mitm_proxy --pasivo`, conectas el cliente al 5001 y haces una transferencia. 2. Sin cerrar sesión, lanzas `python -m ataques.replay` | `nonce repetido` si han pasado menos de 120 s; `timestamp fuera de la ventana` si han pasado más. |
 | Timing | `python -m ataques.timing` | `==` tarda más cuantos más bytes acierta; `compare_digest` tarda siempre lo mismo. Los datos quedan en `evidencias/timing.csv`. |
 
-> Orden del MitM: **1)** servidor (5000), **2)** proxy (5001→5000), **3)** cliente al **5001**.
+> Orden del MitM: 1) servidor (5000), 2) proxy (5001→5000), 3) cliente al 5001.
 
 ## Captura de tráfico (.pcap)
 
-- **Linux:** `sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 5001'` (o `dumpcap -i lo -f '…' -w …` sin sudo si estás en el grupo `wireshark`)
-- **Windows:** abre Wireshark (con Npcap), elige la interfaz *Adapter for loopback traffic capture*, pon el filtro `tcp.port == 5000 || tcp.port == 5001` y usa *Guardar como* en `evidencias/pcap/`.
-- **En Wireshark:** clic derecho sobre un paquete → *Seguir → Secuencia TCP* para ver los JSON en claro con su `hmac`, `nonce` y `timestamp`.
+- Linux: `sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 5001'` (o `dumpcap -i lo -f '…' -w …` sin sudo si estás en el grupo `wireshark`)
+- Windows: abre Wireshark (con Npcap), elige la interfaz *Adapter for loopback traffic capture*, pon el filtro `tcp.port == 5000 || tcp.port == 5001` y usa *Guardar como* en `evidencias/pcap/`.
+- En Wireshark: clic derecho sobre un paquete → *Seguir → Secuencia TCP* para ver los JSON en claro con su `hmac`, `nonce` y `timestamp`.
 
 Hay una captura por escenario en `evidencias/pcap/`: `normal.pcap`, `ataque_mitm.pcap` y `ataque_replay.pcap`.
 
@@ -140,9 +138,9 @@ Hay una captura por escenario en `evidencias/pcap/`: `normal.pcap`, `ataque_mitm
 | `TRANSFER` | `session_id`, `payload` + `nonce`, `timestamp`, `hmac` | `tx_id`, firmado |
 | `LOGOUT` | `session_id` + `nonce`, `timestamp`, `hmac` | `OK`, firmado |
 
-- **La contraseña no viaja nunca después del registro.**
-- **La clave de sesión tampoco viaja:** es `HMAC(K, "session"‖sn‖cn)` y la calculan cliente y servidor cada uno por su lado.
-- **Errores:** van sin firmar. El cliente solo se fía de un `OK` que llegue con firma válida.
+- La contraseña no viaja nunca después del registro.
+- La clave de sesión tampoco viaja: es `HMAC(K, "session"‖sn‖cn)` y la calculan cliente y servidor cada uno por su lado.
+- Errores: van sin firmar. El cliente solo se fía de un `OK` que llegue con firma válida.
 
 ## Dónde se implementa cada requisito
 
@@ -156,7 +154,7 @@ Hay una captura por escenario en `evidencias/pcap/`: `normal.pcap`, `ataque_mitm
 | RS1a PBKDF2 + salt | `comun/protocolo.py` → `derive_key`; `servidor/negocio.py` → `registrar` |
 | RS1b Bloqueo por fallos | `servidor/datos.py` → `apuntar_fallo`; `servidor/negocio.py` → `login` (también para usuarios inexistentes) |
 | RS2a HMAC-SHA256 | `comun/protocolo.py` → `mac`, `canonical`, `sign`, `verify_mac` |
-| RS2b Claves de 256 bits con CSPRNG | `secrets` en `datos.py` (clave del servidor y `session_id`), `negocio.py` (salt y `server_nonce`), `generador.py` (`client_nonce`) y `protocolo.py` (`nonce`) |
+| RS2b Claves de 256 bits con CSPRNG | `secrets` en `datos.py` (clave del servidor y `session_id`, 256 bits); salt y nonces de 128 bits en `negocio.py` (salt y `server_nonce`), `generador.py` (`client_nonce`) y `protocolo.py` (`nonce`) |
 | RS3 Nonce + timestamp | `servidor/validacion.py` → `verificar_mensaje`; `servidor/datos.py` → `registrar_nonce` |
 | RS4 Tiempo constante | `hmac.compare_digest` en `protocolo.py` → `verify_mac`, `validacion.py` → `comprobar_prueba_login` y `datos.py` → `fila_integra` |
 | Integridad de lo almacenado | `servidor/datos.py` → `firma_fila`, `filas_corruptas` (se revisa al arrancar) |
