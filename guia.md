@@ -51,8 +51,8 @@ Todo está hecho con la **librería estándar de Python**, sin instalar nada.
 Para conseguir el código:
 
 ```bash
-git clone https://github.com/tomgutgar/pai1-st5.git
-cd pai1-st5
+git clone https://github.com/Ridawo/ST-5-PAI1.git
+cd ST-5-PAI1
 python --version        # debe decir 3.10 o más
 ```
 
@@ -358,6 +358,7 @@ Recalcula el HMAC del mensaje recibido y lo compara con el campo `hmac` usando *
 Lee una línea del socket.
 - Devuelve `None` si el otro lado cerró la conexión (línea vacía).
 - Lanza `ValueError` si la línea supera `MAX_FRAME`, si no es JSON o si es un JSON que no es un objeto (una lista o un texto, por ejemplo).
+- Una línea demasiado larga se tira **entera**, hasta su `\n`, sin guardarla en memoria. Así el resto no se lee como si fueran tramas nuevas.
 
 ### 6.2 `servidor/datos.py`: persistencia
 
@@ -456,7 +457,7 @@ El filtro por el que pasa todo mensaje que va dentro de una sesión (`TRANSFER` 
 El "repartidor". Mira `msg["action"]` y llama a la función que toca. Devuelve la respuesta y la clave con la que hay que firmarla (`None` significa sin firmar). `estado` es un diccionario propio de cada conexión, donde se guarda el reto de login pendiente. `LOGOUT` se resuelve aquí mismo: verifica el mensaje y borra la sesión.
 
 **`registrar(usuario, password)`**
-Valida el formato de usuario y contraseña, genera un **salt aleatorio de 16 bytes** (`secrets.token_bytes`), calcula `K = derive_key(password, salt)` y guarda `(usuario, salt, K)`. La contraseña **no se guarda nunca**. Lanza `Rechazado` si algo falla o si el usuario ya existe.
+Valida el formato de usuario y contraseña y, si el usuario ya existe, lo rechaza **antes** de calcular PBKDF2 (así mandar el mismo `REGISTER` en bucle no gasta CPU). Después genera un **salt aleatorio de 16 bytes** (`secrets.token_bytes`), calcula `K = derive_key(password, salt)` y guarda `(usuario, salt, K)`. La contraseña **no se guarda nunca**. Lanza `Rechazado` si algo falla o si el usuario ya existe.
 
 **`sembrar()`**
 Crea los usuarios de `USUARIOS_PRUEBA` que no existan. Se llama al arrancar.
@@ -466,11 +467,12 @@ Devuelve el `salt` del usuario y un `server_nonce` nuevo, y guarda `(usuario, se
 
 **`login(msg, estado) -> (respuesta, clave_sesion)`**
 1. Saca el reto de `estado`. Un reto sirve para **un solo intento**, así que se borra al usarlo. Si no hay reto, o es de otro usuario: `hay que pedir LOGIN_INIT antes de LOGIN`.
-2. Lee el usuario de la BD. Si no existe: `credenciales incorrectas`.
-3. Si su `row_mac` no cuadra: `error de integridad en la cuenta`, y se apunta un `ERROR` en el log.
-4. Si está bloqueado: `usuario bloqueado N s por demasiados intentos`.
-5. Comprueba la `proof`. Si falla, llama a `apuntar_fallo` y responde `credenciales incorrectas`.
-6. Si todo va bien, llama a `limpiar_fallos`, calcula `clave_sesion = HMAC(K, "session" ‖ sn ‖ cn)`, crea la sesión y devuelve el `session_id` firmado con esa clave.
+2. Los pasos 3 a 6 se hacen con `_candado_login` cogido. Si no, N `LOGIN` en paralelo leerían a la vez "no bloqueado" y se podrían probar más de 5 contraseñas.
+3. Lee el usuario de la BD. Si no existe, `_fallo_inexistente` lleva su cuenta de fallos en memoria y lo "bloquea" igual que a uno real. Así el mensaje de bloqueo no delata qué usuarios existen. Responde `credenciales incorrectas`, o `usuario bloqueado …` al sexto intento.
+4. Si su `row_mac` no cuadra: `error de integridad en la cuenta`, y se apunta un `ERROR` en el log.
+5. Si está bloqueado: `usuario bloqueado N s por demasiados intentos`.
+6. Comprueba la `proof`. Si falla, llama a `apuntar_fallo` y responde `credenciales incorrectas`.
+7. Si todo va bien, llama a `limpiar_fallos`, calcula `clave_sesion = HMAC(K, "session" ‖ sn ‖ cn)`, crea la sesión y devuelve el `session_id` firmado con esa clave.
 
 **`validar_transaccion(p)`**
 Comprueba el `payload`: `tx_id` UUIDv4, los dos IBAN con formato válido y distintos entre sí, un importe numérico (no booleano) entre 0 y 1.000.000 con 2 decimales como máximo, y moneda `EUR`. Lanza `Rechazado` con un mensaje claro.
@@ -492,7 +494,9 @@ Repite hasta que el cliente cierra:
 Cómo gestiona los errores:
 - `Rechazado` → responde `ERROR` con el motivo y lo apunta en el log como `WARNING`.
 - `ValueError`, `KeyError`, `TypeError` o `AttributeError` (JSON roto, campos que faltan, tipos raros) → responde `trama mal formada` **y sigue atendiendo**. Una trama basura no tumba el servidor ni corta la conexión.
-- `ConnectionError` (el cliente se fue de golpe) → termina sin ruido.
+- `ConnectionError` (el cliente se fue de golpe) o `TimeoutError` → termina sin ruido.
+
+`timeout = SESSION_TTL`: una conexión que pasa 30 minutos sin mandar nada se corta. Si no, un cliente que abre el socket y se queda callado retendría su hilo para siempre.
 
 ### 6.6 `servidor/main.py`: arranque
 
@@ -509,7 +513,7 @@ Lee `host` y `puerto` de la línea de comandos, configura el log (fichero + pant
 |---|---|
 | `__init__(host, puerto)` | Abre el socket TCP (timeout de 10 s) y un lector de líneas sobre él |
 | `pedir(msg) -> dict` | Envía un mensaje y espera la respuesta. Lanza `ConnectionError` si el servidor cierra |
-| `cerrar()` | Cierra el socket |
+| `cerrar()` | Cierra el lector de líneas y el socket. Hay que cerrar los dos: `makefile()` guarda su propia referencia y, si no, el servidor nunca recibe el fin de conexión |
 
 ### 6.8 `cliente/generador.py`: generador de mensajes asegurado
 
@@ -649,14 +653,16 @@ Son un **entregable obligatorio**. Conviene hacer una por escenario:
 | Fichero | Escenario |
 |---|---|
 | `evidencias/pcap/normal.pcap` | Registro, login, transferencia correcta y logout |
-| `evidencias/pcap/mitm.pcap` | Demo 7.1 |
-| `evidencias/pcap/replay.pcap` | Demo 7.2 |
+| `evidencias/pcap/ataque_mitm.pcap` | Demo 7.1 |
+| `evidencias/pcap/ataque_replay.pcap` | Demo 7.2: el reenvío a los pocos segundos (`nonce repetido`) y otro pasados 120 s (`timestamp fuera de la ventana`) |
 
 ### Linux
 
 ```bash
 sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 5001'
 # …haz la demo… y para con Ctrl+C
+# sin sudo, si tu usuario está en el grupo wireshark:
+dumpcap -i lo -f 'tcp port 5000 or tcp port 5001' -w evidencias/pcap/normal.pcap
 ```
 
 ### Windows
@@ -675,7 +681,7 @@ sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 500
   - proxy ↔ servidor (puerto 5000), con el importe cambiado **y el mismo `hmac`**.
 
   Ponerlas una al lado de la otra es la mejor prueba para la memoria.
-- **En la captura de replay:** el mismo `nonce` aparece dos veces, la segunda con la respuesta `nonce repetido`.
+- **En la captura de replay:** el mismo `nonce` aparece tres veces. La primera se acepta, la segunda (a los pocos segundos) da `nonce repetido` y la tercera (pasados 120 s) da `timestamp fuera de la ventana permitida`.
 - **Qué comentar en la memoria**, no basta con pegar la imagen:
   - la contraseña **no aparece** en el login (solo en el registro);
   - cada mensaje lleva `nonce`, `timestamp` y `hmac`;
@@ -686,7 +692,7 @@ sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 500
 ## 9. Tests
 
 ```bash
-python -m unittest discover tests -v                     # todos (unos 7 s)
+python -m unittest discover tests -v                     # todos: 35 tests, unos 15 s
 python -m unittest tests.test_protocolo -v               # solo los del protocolo
 python -m unittest tests.test_seguridad.TestSeguridad.test_replay_nonce_repetido   # uno solo
 ```
@@ -712,9 +718,11 @@ Prueba las funciones del protocolo sin red.
 | `test_nonce_o_timestamp_alterados_no_verifican` | No se puede "refrescar" un mensaje viejo cambiando nonce o timestamp |
 | `test_clave_distinta_no_verifica` | Con otra clave no verifica |
 | `test_hmac_ausente_o_raro_no_verifica` | `None`, vacío, caracteres no ASCII, números o listas → `False`, sin excepción |
+| `test_verify_mac_usa_compare_digest` | `verify_mac` compara con `hmac.compare_digest` (RS4), acierte o falle |
 | `test_nonces_distintos` | Cada firma lleva un nonce nuevo |
 | `test_derivacion_con_salt` | PBKDF2 da 32 bytes, es determinista y con otro salt da otra clave |
-| `test_tramas_mal_formadas` | Texto, lista, cadena o una línea gigante → `ValueError` |
+| `test_tramas_mal_formadas` | Texto, lista o cadena suelta → `ValueError` |
+| `test_trama_gigante_se_descarta_entera` | Un JSON válido de más de `MAX_FRAME` → `ValueError`, y la trama siguiente se lee bien |
 | `test_conexion_cerrada` | Una línea vacía → `None` |
 
 ### `tests/test_seguridad.py`
@@ -728,17 +736,22 @@ Arranca un **servidor de verdad** en un puerto libre, con una BD temporal, y hab
 | `test_login_correcto_con_respuesta_firmada` | RF1, RS2 | Login OK, con la respuesta firmada |
 | `test_login_mal_y_usuario_inexistente` | RS1 | Mismo error con contraseña mala que con usuario inexistente |
 | `test_bloqueo_tras_5_fallos` | RS1b | Tras 5 fallos, ni la contraseña buena entra |
+| `test_bloqueo_usuario_inexistente` | RS1b | Un usuario que no existe también sale `bloqueado` al sexto intento, así no se delata |
 | `test_login_sin_reto` | Protocolo | Un `LOGIN` sin `LOGIN_INIT` previo se rechaza |
 | `test_transferencia_correcta` | RF2 | Transferencia OK, con respuesta firmada y el mismo `tx_id` |
 | `test_mitm_importe_alterado` | RS2 | Importe cambiado → `MAC inválido` |
 | `test_mitm_mac_falsificado` | RS2 | Firmado con otra clave → `MAC inválido` |
 | `test_transaccion_con_datos_invalidos` | RF2 | IBAN corto, importe negativo, 3 decimales u origen igual a destino → `ERROR` |
 | `test_replay_nonce_repetido` | RS3 | El mismo mensaje dos veces → `nonce repetido` |
-| `test_replay_timestamp_caducado` | RS3 | Un mensaje bien firmado pero de hace 5 min → `timestamp` |
+| `test_replay_timestamp_caducado` | RS3 | Un mensaje bien firmado de hace 5 min o de dentro de 5 min → `timestamp` |
+| `test_timestamp_dentro_de_la_ventana_se_acepta` | RS3 | Con el reloj 100 s atrasado o adelantado se acepta |
+| `test_nonces_antiguos_se_borran` | RS3 | Los nonces de más de 240 s se borran y los recientes se conservan |
+| `test_comparaciones_en_tiempo_constante` | RS4 | Firma de mensajes, prueba de login y firma de filas pasan por `compare_digest` |
 | `test_logout_invalida_la_sesion` | RF1d | Después del logout, la sesión ya no sirve |
 | `test_sesion_inventada` | RF1d | Un `session_id` inventado → `sesión no válida` |
 | `test_trama_mal_formada_no_tumba_el_servidor` | Robustez | Cuatro tramas basura → `ERROR`, y la conexión sigue viva |
 | `test_manipular_la_bd_se_detecta` | Política | Cambiar un importe en el `.db` → `filas_corruptas()` lo detecta |
+| `test_manipular_bloqueo_se_detecta` | RS1b | Desbloquear una cuenta editando `failed`/`locked_until` en el `.db` → se detecta |
 
 ---
 
@@ -756,7 +769,7 @@ transactions(tx_id PK, origin, dest, amount, currency, ts, username, row_mac)
 |---|---|
 | `users.salt` | 16 bytes aleatorios, distintos para cada usuario |
 | `users.key` | `PBKDF2(password, salt)`, 32 bytes. **No es la contraseña** |
-| `users.row_mac` | Firma de `(username, salt, key)` con la clave del servidor |
+| `users.row_mac` | Firma de `(username, salt, key, failed, locked_until)` con la clave del servidor |
 | `users.failed` / `locked_until` | Fallos seguidos y hasta cuándo está bloqueado (hora Unix) |
 | `nonces.seen_at` | Cuándo se vio el nonce. Los de más de 240 s se borran solos |
 | `transactions.ts` | Timestamp del mensaje con el que llegó la transferencia |
@@ -793,11 +806,11 @@ Con `users` pasa lo mismo: si alguien cambia la `key` de un usuario, ese usuario
 
 ### Desbloquear un usuario sin esperar 5 minutos
 
-```bash
-python -c "import sqlite3; c=sqlite3.connect('secbank.db'); c.execute(\"UPDATE users SET locked_until=0, failed=0 WHERE username='alice'\"); c.commit()"
-```
+`failed` y `locked_until` entran en el `row_mac`. Si los cambias a mano con `sqlite3`, la cuenta queda marcada como manipulada (`error de integridad en la cuenta`). Hay que cambiarlos con el código del servidor, que vuelve a firmar la fila:
 
-`locked_until` y `failed` no entran en el `row_mac`, así que esto no dispara la alarma de integridad.
+```bash
+python -c "from servidor import datos; datos.init('secbank.db', 'servidor.key'); datos._db.execute(\"UPDATE users SET failed=0, locked_until=0 WHERE username='alice'\"); datos._resellar_usuario('alice'); datos._db.commit()"
+```
 
 ### Empezar de cero
 
@@ -867,7 +880,9 @@ Conviene conocerlas para **defenderlas en la corrección** y comentarlas en la m
 - **Tiempo constante en todas las comparaciones de secretos.** Firmas de mensajes, prueba de login y firmas de filas usan `hmac.compare_digest`.
 - **Firma de filas en la BD.** Cubre la parte de la política sobre la integridad de "usuarios registrados" y "órdenes procesadas" también en el almacenamiento, no solo en la red.
 - **Sesiones en memoria.** Nunca tocan el disco, así que no se pueden manipular editando ficheros. Cubre la integridad de las "sesiones activas".
-- **Usuario inexistente indistinguible.** Tiene un salt falso pero estable y el mismo mensaje de error.
+- **Usuario inexistente indistinguible.** Tiene un salt falso pero estable, el mismo mensaje de error y también se "bloquea" a los 5 fallos.
+- **Login atómico.** Comprobar el bloqueo, verificar la prueba y apuntar el fallo se hace de una vez, con un candado. Así ni con muchos `LOGIN` en paralelo se pasa de 5 intentos.
+- **Conexiones con caducidad.** Una conexión que pasa 30 minutos callada se corta, para que nadie acapare hilos del servidor dejando sockets abiertos.
 
 ### Limitaciones, y lo que haría falta para quitarlas
 
@@ -878,7 +893,10 @@ Conviene conocerlas para **defenderlas en la corrección** y comentarlas en la m
 | Los **errores** no van firmados | Muchos ocurren antes de tener clave | El cliente ya solo confía en un `OK` firmado; un error falso solo causa denegación de servicio |
 | No se comprueba que la cuenta de **origen** sea del usuario | El enunciado no define cuentas | Una tabla `accounts(iban, username)` y una comprobación en `transferir` |
 | Las sesiones se pierden al **reiniciar** el servidor | Viven en memoria | Aceptable: basta con volver a iniciar sesión |
-| Un único candado para toda la BD | Sencillez | Con mucha carga, un pool de conexiones o un motor como PostgreSQL |
+| Un único candado para toda la BD, y otro para todos los login | Sencillez | Con mucha carga, un pool de conexiones o un motor como PostgreSQL, y un candado por usuario |
+| El **registro** está abierto y cada alta nueva cuesta un PBKDF2 | Lo pide RF1a | Limitar los registros por IP o pedir un CAPTCHA |
+| `REGISTER` revela si un nombre ya existe (`ya existe`) | RF1c obliga a rechazar duplicados | Inevitable sin otro canal; el login sí es indistinguible |
+| No hay tope de conexiones a la vez | `ThreadingTCPServer` abre un hilo por cliente | Un pool de hilos con tamaño máximo |
 | Sin cifrado del contenido | No lo pide la práctica: se evalúa **integridad**, no confidencialidad | AES-GCM en la capa de aplicación |
 
 ---

@@ -44,6 +44,7 @@ PAI1-ST5/
 │   ├── test_protocolo.py  Tests unitarios de la criptografía (firma, MAC, tramas raras).
 │   └── test_seguridad.py  Tests de extremo a extremo: levanta un servidor real y lo ataca.
 │
+├── docs/                  Memoria de la práctica (máximo 10 páginas) y diagramas.
 ├── evidencias/            Salidas para el entregable (log del servidor y capturas .pcap).
 ├── guia.md                Guía completa: teoría, demos paso a paso y solución de problemas.
 ├── planteamiento.md       Decisiones de diseño y reparto de la práctica.
@@ -90,17 +91,24 @@ BD temporal y hablan con él por TCP. Con `-v` verás, intercalada con cada test
 actividad del servidor prefijada con `[srv]`:
 
 ```
-test_login_correcto_con_respuesta_firmada ...     [srv] INFO    conexión de 127.0.0.1:38762
-    [srv] INFO    login OK alice
-ok
-test_bloqueo_tras_5_fallos ...     [srv] WARNING login FALLIDO eve
-    [srv] WARNING 127.0.0.1:38748 RECHAZADO: usuario bloqueado 299 s por demasiados intentos
+▶ test_bloqueo_tras_5_fallos
+  RS1b — 5 contraseñas incorrectas seguidas bloquean la cuenta.
+  Esperado: tras MAX_FALLOS fallos, ni con la contraseña correcta se puede entrar.
+──────────────────────────────────────────────────────────────────────────
+    · 'eve' registrada; se falla el login 5 veces seguidas
+    [srv] WARNING login FALLIDO eve
+    [srv] WARNING 127.0.0.1:37128 RECHAZADO: credenciales incorrectas
+    ...
+    ✓ tras 5 fallos la cuenta queda bloqueada
+    · ahora se intenta con la contraseña CORRECTA
+    [srv] WARNING 127.0.0.1:37128 RECHAZADO: usuario bloqueado 299 s por demasiados intentos
+    ✓ aun así se rechaza: usuario bloqueado 299 s por demasiados intentos
 ok
 ```
 
 Así se ve qué está pasando por dentro en cada caso (login, bloqueo, MitM, replay,
-detección de manipulación de la BD...). Tardan ~1-2 min porque PBKDF2 usa 600.000
-iteraciones a propósito.
+detección de manipulación de la BD...). Son 35 tests y tardan unos 15 s; casi todo es
+PBKDF2, que usa 600.000 iteraciones a propósito.
 
 ## Ataques de demostración
 
@@ -116,11 +124,11 @@ Los tres confirman que las defensas hacen su trabajo. (Detalle paso a paso en `g
 
 ## Captura de tráfico (.pcap)
 
-- **Linux:** `sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 5001'`
+- **Linux:** `sudo tcpdump -i lo -w evidencias/pcap/normal.pcap 'tcp port 5000 or tcp port 5001'` (o `dumpcap -i lo -f '…' -w …` sin sudo si estás en el grupo `wireshark`)
 - **Windows:** abre Wireshark (con Npcap), elige la interfaz *Adapter for loopback traffic capture*, pon el filtro `tcp.port == 5000 || tcp.port == 5001` y usa *Guardar como* en `evidencias/pcap/`.
 - **En Wireshark:** clic derecho sobre un paquete → *Seguir → Secuencia TCP* para ver los JSON en claro con su `hmac`, `nonce` y `timestamp`.
 
-Se graba una captura por escenario: `normal.pcap`, `mitm.pcap` y `replay.pcap`.
+Hay una captura por escenario en `evidencias/pcap/`: `normal.pcap`, `ataque_mitm.pcap` y `ataque_replay.pcap`.
 
 ## Protocolo
 
@@ -146,9 +154,9 @@ Se graba una captura por escenario: `normal.pcap`, `mitm.pcap` y `replay.pcap`.
 | RF1d Sesiones y logout | `servidor/datos.py` → `crear_sesion`, `leer_sesion`, `borrar_sesion`; `negocio.py` → `LOGOUT` |
 | RF2 Transacciones | `cliente/generador.py` → `transferencia`; `servidor/negocio.py` → `validar_transaccion`, `transferir` |
 | RS1a PBKDF2 + salt | `comun/protocolo.py` → `derive_key`; `servidor/negocio.py` → `registrar` |
-| RS1b Bloqueo por fallos | `servidor/datos.py` → `apuntar_fallo`; `servidor/negocio.py` → `login` |
+| RS1b Bloqueo por fallos | `servidor/datos.py` → `apuntar_fallo`; `servidor/negocio.py` → `login`, `_fallo_inexistente` |
 | RS2a HMAC-SHA256 | `comun/protocolo.py` → `mac`, `canonical`, `sign`, `verify_mac` |
-| RS2b Claves de 256 bits con CSPRNG | `secrets.token_bytes` en `protocolo.py`, `datos.py` y `generador.py` |
+| RS2b Claves de 256 bits con CSPRNG | `secrets` en `datos.py` (clave del servidor y `session_id`), `negocio.py` (salt y `server_nonce`), `generador.py` (`client_nonce`) y `protocolo.py` (`nonce`) |
 | RS3 Nonce + timestamp | `servidor/validacion.py` → `verificar_mensaje`; `servidor/datos.py` → `registrar_nonce` |
 | RS4 Tiempo constante | `hmac.compare_digest` en `protocolo.py` → `verify_mac`, `validacion.py` → `comprobar_prueba_login` y `datos.py` → `fila_integra` |
 | Integridad de lo almacenado | `servidor/datos.py` → `firma_fila`, `filas_corruptas` (se revisa al arrancar) |
