@@ -18,4 +18,5 @@ class Conexion:
         return respuesta
 
     def cerrar(self):
+        self.rfile.close()  # makefile() guarda su propia referencia al socket: sin esto no se cierra de verdad
         self.sock.close()

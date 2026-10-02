@@ -3,6 +3,7 @@ import logging
 import socketserver
 
 from comun.protocolo import recv_frame, send_frame, sign
+from servidor.datos import SESSION_TTL
 from servidor.negocio import atender
 from servidor.validacion import Rechazado
 
@@ -11,6 +12,7 @@ log = logging.getLogger("secbank")
 
 class Manejador(socketserver.StreamRequestHandler):
     """Un hilo por cliente conectado. Lee trama a trama hasta que el cliente cierra."""
+    timeout = SESSION_TTL  # una conexión callada más que una sesión se corta: si no, retendría su hilo para siempre
 
     def handle(self):
         quien = "%s:%s" % self.client_address
@@ -32,6 +34,6 @@ class Manejador(socketserver.StreamRequestHandler):
                     log.warning("%s trama mal formada: %r", quien, e)
                     respuesta = {"status": "ERROR", "reason": "trama mal formada"}
                 send_frame(self.request, sign(respuesta, clave) if clave else respuesta)
-        except ConnectionError:
+        except (ConnectionError, TimeoutError):
             pass
         log.info("desconexión de %s", quien)

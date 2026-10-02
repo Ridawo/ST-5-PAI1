@@ -61,6 +61,8 @@ def recv_frame(rfile) -> dict | None:
     if not linea:
         return None
     if len(linea) > MAX_FRAME:
+        while linea and not linea.endswith(b"\n"):  # se tira el resto de la línea para no leerlo como tramas nuevas
+            linea = rfile.readline(MAX_FRAME)
         raise ValueError("trama demasiado grande")
     msg = json.loads(linea)  # si no es JSON lanza JSONDecodeError, que es un ValueError
     if not isinstance(msg, dict):

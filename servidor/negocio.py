@@ -11,6 +11,7 @@ Los errores se responden sin firmar: el cliente solo se fía de un OK con firma 
 import logging
 import re
 import secrets
+import threading
 import time
 import uuid
 
@@ -23,6 +24,9 @@ USUARIOS_PRUEBA = [("alice", "alice1234"), ("bob", "bob12345"), ("carol", "carol
 IBAN = re.compile(r"[A-Z]{2}\d{22}")
 
 log = logging.getLogger("secbank")
+
+_candado_login = threading.Lock()  # bloqueo + prueba + fallo de una vez: si no, N LOGIN en paralelo se saltan el límite
+_inexistentes = {}                 # usuario que no existe -> (fallos, bloqueado_hasta), solo en memoria
 
 
 def atender(msg, estado):
@@ -53,6 +57,8 @@ def registrar(usuario, password):
         raise Rechazado("usuario no válido (solo letras y números, máximo 32)")
     if not (isinstance(password, str) and len(password) >= 8):
         raise Rechazado("la contraseña debe tener al menos 8 caracteres")
+    if datos.leer_usuario(usuario) is not None:  # antes de PBKDF2: así repetir el REGISTER no gasta CPU
+        raise Rechazado("el usuario ya existe")
     salt = secrets.token_bytes(16)  # RS1a: salt aleatorio y distinto para cada usuario
     if not datos.crear_usuario(usuario, salt, derive_key(password, salt)):
         raise Rechazado("el usuario ya existe")
@@ -81,25 +87,44 @@ def login(msg, estado):
         raise Rechazado("hay que pedir LOGIN_INIT antes de LOGIN")
     usuario, server_nonce = reto
     client_nonce = bytes.fromhex(msg["client_nonce"])
-    fila = datos.leer_usuario(usuario)
-    if fila is None:
-        raise Rechazado("credenciales incorrectas")
-    _, clave, bloqueado_hasta, integra = fila
-    if not integra:
-        log.error("INTEGRIDAD BD: credenciales de %s manipuladas", usuario)
-        raise Rechazado("error de integridad en la cuenta, contacta con el banco")
-    if bloqueado_hasta > time.time():
-        raise Rechazado(f"usuario bloqueado {int(bloqueado_hasta - time.time())} s por demasiados intentos")
-    if not comprobar_prueba_login(clave, server_nonce, client_nonce, msg["proof"]):
-        datos.apuntar_fallo(usuario, MAX_FALLOS, BLOQUEO_SEG)
-        log.warning("login FALLIDO %s", usuario)
-        raise Rechazado("credenciales incorrectas")
-    datos.limpiar_fallos(usuario)
+    with _candado_login:
+        fila = datos.leer_usuario(usuario)
+        if fila is None:
+            _fallo_inexistente(usuario)
+        _, clave, bloqueado_hasta, integra = fila
+        if not integra:
+            log.error("INTEGRIDAD BD: credenciales de %s manipuladas", usuario)
+            raise Rechazado("error de integridad en la cuenta, contacta con el banco")
+        _comprobar_bloqueo(bloqueado_hasta)
+        if not comprobar_prueba_login(clave, server_nonce, client_nonce, msg["proof"]):
+            datos.apuntar_fallo(usuario, MAX_FALLOS, BLOQUEO_SEG)
+            log.warning("login FALLIDO %s", usuario)
+            raise Rechazado("credenciales incorrectas")
+        datos.limpiar_fallos(usuario)
     # El cliente calcula la misma clave por su lado: la clave de sesión nunca viaja por la red
     clave_sesion = mac(clave, b"session" + server_nonce + client_nonce)
     sid = datos.crear_sesion(usuario, clave_sesion)
     log.info("login OK %s", usuario)
     return {"status": "OK", "session_id": sid}, clave_sesion
+
+
+def _comprobar_bloqueo(bloqueado_hasta):
+    if bloqueado_hasta > time.time():
+        raise Rechazado(f"usuario bloqueado {int(bloqueado_hasta - time.time())} s por demasiados intentos")
+
+
+def _fallo_inexistente(usuario):
+    """Un usuario que no existe se bloquea igual que uno real tras MAX_FALLOS fallos: si no,
+    que salga o no el mensaje de bloqueo delataría qué usuarios existen. Siempre lanza Rechazado."""
+    fallos, bloqueado_hasta = _inexistentes.get(usuario, (0, 0.0))
+    _comprobar_bloqueo(bloqueado_hasta)
+    fallos += 1
+    if fallos >= MAX_FALLOS:
+        fallos, bloqueado_hasta = 0, time.time() + BLOQUEO_SEG
+    if len(_inexistentes) >= 10_000:  # tope de memoria; olvidarlos no es un riesgo: no protegen ninguna cuenta
+        _inexistentes.clear()
+    _inexistentes[usuario] = (fallos, bloqueado_hasta)
+    raise Rechazado("credenciales incorrectas")
 
 
 # ---------- transacciones ----------
