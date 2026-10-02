@@ -3,8 +3,4 @@
 __pycache__/
 *.db
 .venv/
-CLAUDE.md
-**/CLAUDE.md
-CLAUDE.local.md
-.claude/
 *.key
